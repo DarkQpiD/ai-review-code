@@ -1,0 +1,15 @@
+# env files
+.env
+.env.*
+!.env.example
+
+# secrets
+*.key
+*.pem
+
+# OS
+.DS_Store
+
+# Node / Python (ถ้ามี)
+node_modules/
+__pycache__/

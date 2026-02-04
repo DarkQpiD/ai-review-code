@@ -1,34 +1,32 @@
-import json
-import requests
-from redis import Redis
-from prompt import build_prompt
-from github import post_pr_comment
 import os
+from fastapi import FastAPI
+from google import genai
 
-redis = Redis(host=os.getenv("REDIS_HOST", "redis"), port=6379)
+from github import comment_pr
+from prompt import PROMPT
 
-while True:
-    _, raw = redis.blpop("review-queue")
-    job = json.loads(raw)
+# --- Init Gemini client ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 
-    repo = job["repo"]
-    pr_number = job["pr_number"]
-    diff = job["diff"]
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set")
 
-    prompt = build_prompt(diff)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-    res = requests.post(
-        "http://ollama:11434/api/generate",
-        json={
-            "model": "deepseek-coder:6.7b",
-            "prompt": prompt,
-            "stream": False
-        }
+app = FastAPI()
+
+
+@app.post("/review")
+async def review(payload: dict):
+    diff = "TODO: fetch diff from GitHub API"
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=PROMPT.format(diff=diff),
     )
-    review = res.json()["response"]
 
-    comment = f"""## 🤖 AI Code Review (DeepSeek)
+    review_text = response.text
+    comment_pr(payload, review_text)
 
-{review}
-"""
-    post_pr_comment(repo, pr_number, comment)
+    return {"reviewed": True}
