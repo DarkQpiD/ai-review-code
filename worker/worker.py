@@ -1,32 +1,76 @@
 import os
-from fastapi import FastAPI
-from google import genai
-
-from github import comment_pr
-from prompt import PROMPT
-
-# --- Init Gemini client ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
-
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is not set")
-
-client = genai.Client(api_key=GEMINI_API_KEY)
+import requests
+from fastapi import FastAPI, Request
 
 app = FastAPI()
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL = os.getenv("OPENROUTER_MODEL")
 
-@app.post("/review")
-async def review(payload: dict):
-    diff = "TODO: fetch diff from GitHub API"
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=PROMPT.format(diff=diff),
+def get_pr_diff(repo_full_name, pr_number):
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3.diff"
+    }
+
+    response = requests.get(url, headers=headers)
+    return response.text
+
+
+def call_ai(diff_text):
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a senior software engineer reviewing a pull request. Be concise and helpful."
+                },
+                {
+                    "role": "user",
+                    "content": f"Review this diff:\n\n{diff_text[:8000]}"
+                }
+            ]
+        }
     )
 
-    review_text = response.text
-    comment_pr(payload, review_text)
+    result = response.json()
+    return result["choices"][0]["message"]["content"]
 
-    return {"reviewed": True}
+
+def comment_on_pr(repo_full_name, pr_number, comment):
+    url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    requests.post(url, headers=headers, json={
+        "body": f"🤖 AI Code Review\n\n{comment}"
+    })
+
+
+@app.post("/review")
+async def review(request: Request):
+    payload = await request.json()
+
+    repo = payload["repository"]["full_name"]
+    pr_number = payload["pull_request"]["number"]
+
+    print(f"Reviewing PR #{pr_number}")
+
+    diff = get_pr_diff(repo, pr_number)
+    ai_review = call_ai(diff)
+    comment_on_pr(repo, pr_number, ai_review)
+
+    return {"status": "reviewed"}
