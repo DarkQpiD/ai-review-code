@@ -1,37 +1,45 @@
-from fastapi import FastAPI, Request, Header
-from redis import Redis
-import json
-from github import verify_signature, get_pr_diff
-from settings import REDIS_HOST, REDIS_PORT
+import os
+import hmac
+import hashlib
+import requests
+from fastapi import FastAPI, Request, HTTPException
 
 app = FastAPI()
-redis = Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
+WORKER_URL = os.getenv("WORKER_URL")
+
+
+def verify_signature(payload_body, signature_header):
+    if not signature_header:
+        return False
+
+    sha_name, signature = signature_header.split('=')
+    if sha_name != 'sha256':
+        return False
+
+    mac = hmac.new(
+        GITHUB_SECRET.encode(),
+        msg=payload_body,
+        digestmod=hashlib.sha256
+    )
+
+    return hmac.compare_digest(mac.hexdigest(), signature)
+
 
 @app.post("/webhook/github")
-async def github_webhook(
-    request: Request,
-    x_hub_signature_256: str = Header(None)
-):
+async def github_webhook(request: Request):
     body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
 
-    if not verify_signature(body, x_hub_signature_256):
-        return {"error": "invalid signature"}
+    if not verify_signature(body, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
 
     payload = await request.json()
 
-    if payload.get("action") not in ["opened", "synchronize"]:
-        return {"status": "ignored"}
+    if payload.get("action") == "opened" and "pull_request" in payload:
+        print("PR opened → sending to worker")
 
-    repo = payload["repository"]["full_name"]
-    pr_number = payload["pull_request"]["number"]
+        requests.post(WORKER_URL, json=payload)
 
-    diff = get_pr_diff(repo, pr_number)
-
-    job = {
-        "repo": repo,
-        "pr_number": pr_number,
-        "diff": diff
-    }
-
-    redis.rpush("review-queue", json.dumps(job))
-    return {"status": "queued"}
+    return {"status": "ok"}

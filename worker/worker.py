@@ -1,34 +1,76 @@
-import json
-import requests
-from redis import Redis
-from prompt import build_prompt
-from github import post_pr_comment
 import os
+import requests
+from fastapi import FastAPI, Request
 
-redis = Redis(host=os.getenv("REDIS_HOST", "redis"), port=6379)
+app = FastAPI()
 
-while True:
-    _, raw = redis.blpop("review-queue")
-    job = json.loads(raw)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL = os.getenv("OPENROUTER_MODEL")
 
-    repo = job["repo"]
-    pr_number = job["pr_number"]
-    diff = job["diff"]
 
-    prompt = build_prompt(diff)
+def get_pr_diff(repo_full_name, pr_number):
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
 
-    res = requests.post(
-        "http://ollama:11434/api/generate",
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3.diff"
+    }
+
+    response = requests.get(url, headers=headers)
+    return response.text
+
+
+def call_ai(diff_text):
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        },
         json={
-            "model": "deepseek-coder:6.7b",
-            "prompt": prompt,
-            "stream": False
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a senior software engineer reviewing a pull request. Be concise and helpful."
+                },
+                {
+                    "role": "user",
+                    "content": f"Review this diff:\n\n{diff_text[:8000]}"
+                }
+            ]
         }
     )
-    review = res.json()["response"]
 
-    comment = f"""## 🤖 AI Code Review (DeepSeek)
+    result = response.json()
+    return result["choices"][0]["message"]["content"]
 
-{review}
-"""
-    post_pr_comment(repo, pr_number, comment)
+
+def comment_on_pr(repo_full_name, pr_number, comment):
+    url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    requests.post(url, headers=headers, json={
+        "body": f"🤖 AI Code Review\n\n{comment}"
+    })
+
+
+@app.post("/review")
+async def review(request: Request):
+    payload = await request.json()
+
+    repo = payload["repository"]["full_name"]
+    pr_number = payload["pull_request"]["number"]
+
+    print(f"Reviewing PR #{pr_number}")
+
+    diff = get_pr_diff(repo, pr_number)
+    ai_review = call_ai(diff)
+    comment_on_pr(repo, pr_number, ai_review)
+
+    return {"status": "reviewed"}
